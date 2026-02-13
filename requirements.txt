@@ -1,0 +1,27 @@
+# Core Streamlit and Python dependencies
+streamlit>=1.30.0
+python-dotenv==1.0.1
+
+# LangChain ecosystem
+langchain==0.1.20
+langchain-community==0.0.38
+langchain-core==0.1.52
+langchain-text-splitters==0.0.1
+langchain-groq==0.1.3
+
+# ML and Vector Store
+numpy>=1.24.0,<2.0.0
+faiss-cpu==1.7.4
+sentence-transformers==2.2.2
+huggingface-hub==0.20.3
+
+# PDF processing
+PyPDF2==3.0.1
+
+# Data visualization and analysis
+plotly>=5.18.0
+pandas>=2.0.0
+
+# Additional utilities
+requests>=2.31.0
+urllib3>=1.26.0

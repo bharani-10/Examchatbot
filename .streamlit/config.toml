@@ -1,0 +1,26 @@
+[global]
+developmentMode = false
+
+[server]
+runOnSave = true
+port = 8501
+enableCORS = false
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+primaryColor = "#a78bfa"
+backgroundColor = "#0b0f19"
+secondaryBackgroundColor = "#131a2b"
+textColor = "#eaeaf6"
+
+[client]
+caching = true
+displayEnabled = true
+
+[runner]
+magicEnabled = true
+installTracer = false
+fixMatplotlib = true
