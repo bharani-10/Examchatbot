@@ -1,22 +1,146 @@
+import io
 import os
+import re
 import time
 import streamlit as st
 import logging
-from typing import Optional
-
-# Import our production modules
-from config_prod import GROQ_API_KEY, MODEL_NAME, MAX_CHAT_HISTORY
-from utils_prod import (
-    parse_pdf_info, format_question, validate_file_upload, 
-    sanitize_input, is_smalltalk, get_smalltalk_response
-)
-from vectorstore_utils import create_vectorstore, load_vectorstore
-from rag_chain import get_rag_chain
-from langchain_groq import ChatGroq
+from PyPDF2 import PdfReader
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Configuration
+MODEL_NAME = "llama-3.1-8b-instant"
+MAX_CHAT_HISTORY = 50
+
+def get_groq_api_key():
+    """Get GROQ API key from Streamlit secrets or environment"""
+    try:
+        return st.secrets["GROQ_API_KEY"]
+    except (KeyError, FileNotFoundError):
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+            api_key = os.getenv("GROQ_API_KEY")
+            if api_key:
+                return api_key
+        except ImportError:
+            pass
+        st.error("🔑 GROQ API Key not found! Please add it to Streamlit secrets.")
+        st.info("Get your free API key from: https://console.groq.com/")
+        st.stop()
+
+# Utility functions
+def parse_pdf_info(file):
+    """Parse PDF and extract text"""
+    try:
+        data = file.read()
+        reader = PdfReader(io.BytesIO(data))
+        pages = len(reader.pages)
+        
+        if pages > 50:  # Limit for performance
+            st.warning(f"⚠️ Large PDF detected ({pages} pages). Processing first 50 pages only.")
+            pages = 50
+            
+        text = ""
+        for i, page in enumerate(reader.pages[:pages]):
+            page_text = page.extract_text() or ""
+            text += page_text + "\n"
+            
+        return text.strip(), pages
+    except Exception as e:
+        st.error(f"Error processing PDF: {str(e)}")
+        return "", 0
+
+def detect_marks(q):
+    """Detect marks from question"""
+    if not q:
+        return None
+    ql = q.lower()
+    patterns = [
+        r"(\b1\b|\b2\b|\b10\b|\b12\b)\s*mark",
+        r"(\b10\b|\b12\b)\s*marks",
+        r"\bfor\s*(1|2|10|12)\s*marks?\b"
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, ql)
+        if m:
+            return int(m.group(1))
+    return None
+
+def format_question(q):
+    """Format question with mark guidance"""
+    mk = detect_marks(q)
+    if mk is None:
+        return q
+    guide = {
+        1: "Provide a one-line definition suitable for 1 mark.",
+        2: "Provide 2–3 concise bullet points suitable for 2 marks.",
+        10: "Provide a structured, detailed explanation suitable for 10 marks.",
+        12: "Provide a structured, comprehensive explanation suitable for 12 marks."
+    }[mk]
+    return f"{q}\n\nMarks: {mk}\n{guide}"
+
+def validate_file_upload(uploaded_file):
+    """Validate uploaded file"""
+    if not uploaded_file:
+        return False
+    if uploaded_file.size > 10 * 1024 * 1024:  # 10MB limit
+        st.error("📄 File too large! Please upload a PDF smaller than 10MB.")
+        return False
+    if not uploaded_file.name.lower().endswith('.pdf'):
+        st.error("📄 Please upload a PDF file only.")
+        return False
+    return True
+
+def sanitize_input(text):
+    """Sanitize user input"""
+    if not text:
+        return ""
+    text = re.sub(r'\s+', ' ', text.strip())
+    if len(text) > 1000:
+        text = text[:1000] + "..."
+        st.warning("⚠️ Question truncated to 1000 characters.")
+    return text
+
+def is_smalltalk(text):
+    """Check if text is smalltalk"""
+    if not text:
+        return False
+    t = text.strip().lower()
+    keywords = ["hi", "hii", "hello", "hey", "good morning", "good evening", "thanks", "thank you"]
+    return any(k in t for k in keywords)
+
+def get_smalltalk_response(text):
+    """Generate smalltalk response"""
+    t = text.strip().lower()
+    if any(k in t for k in ["hi", "hii", "hello", "hey"]):
+        return "Hi there! 👋 I'm your Exam Assistant. Upload your syllabus PDF and ask me any questions!"
+    if "exam" in t and ("tomorrow" in t or "today" in t or "help me" in t):
+        return "Let's get you ready! 📚 Upload your syllabus PDF and I'll help you with quick definitions (1-2 marks) and detailed explanations (10-12 marks). What topic shall we start with?"
+    if "thanks" in t or "thank you" in t:
+        return "You're welcome! 😊 Need help with more questions? I'm here to help you ace your exam!"
+    return "Hello! How can I help you with your studies today?"
+
+@st.cache_resource
+def get_llm():
+    """Get LLM with caching"""
+    try:
+        from langchain_groq import ChatGroq
+        api_key = get_groq_api_key()
+        return ChatGroq(
+            groq_api_key=api_key,
+            model_name=MODEL_NAME,
+            temperature=0.5,
+            max_retries=2
+        )
+    except ImportError:
+        st.error("LangChain not available. Please install required dependencies.")
+        st.stop()
+    except Exception as e:
+        st.error(f"Error initializing AI model: {str(e)}")
+        st.stop()
 
 # Page configuration
 st.set_page_config(
@@ -251,7 +375,7 @@ def initialize_session_state():
         "uploads": [],
         "greeted": False,
         "indexed_files": set(),
-        "vectorstore": None,
+        "pdf_content": "",
         "error_count": 0,
         "last_error": None
     }
@@ -260,46 +384,7 @@ def initialize_session_state():
         if key not in st.session_state:
             st.session_state[key] = default_value
 
-@st.cache_resource(show_spinner=False)
-def initialize_vectorstore():
-    """Initialize vectorstore with caching"""
-    try:
-        vectorstore_dir = "vectorstore"
-        data_file = "syllabus.txt"
-        
-        # Try to load existing vectorstore
-        if os.path.exists(vectorstore_dir):
-            return load_vectorstore()
-        
-        # Try to create from base data file
-        if os.path.exists(data_file):
-            with open(data_file, "r", encoding="utf-8") as f:
-                base_text = f.read()
-            return create_vectorstore(base_text)
-        
-        return None
-        
-    except Exception as e:
-        logger.error(f"Error initializing vectorstore: {str(e)}")
-        return None
-
-@st.cache_resource(show_spinner=False)
-def get_llm():
-    """Get LLM instance with caching"""
-    try:
-        return ChatGroq(
-            groq_api_key=GROQ_API_KEY, 
-            model_name=MODEL_NAME, 
-            temperature=0.5,
-            max_retries=3,
-            request_timeout=30
-        )
-    except Exception as e:
-        logger.error(f"Error initializing LLM: {str(e)}")
-        st.error("🤖 Failed to initialize AI model. Please check your API key.")
-        st.stop()
-
-def process_chat_message(prompt: str) -> str:
+def process_chat_message(prompt):
     """Process chat message with error handling"""
     try:
         # Sanitize input
@@ -316,19 +401,15 @@ def process_chat_message(prompt: str) -> str:
         # Format question for marks
         formatted_question = format_question(prompt)
         
-        # Use vectorstore if available
-        if st.session_state.vectorstore:
-            try:
-                chain = get_rag_chain(st.session_state.vectorstore)
-                return chain.invoke(formatted_question)
-            except Exception as e:
-                logger.error(f"RAG chain error: {str(e)}")
-                # Fallback to direct LLM
-                pass
+        # Enhanced prompt with PDF content if available
+        if st.session_state.pdf_content:
+            enhanced_prompt = f"Based on the following syllabus content, please answer this question:\n\nSyllabus: {st.session_state.pdf_content[:2000]}...\n\nQuestion: {formatted_question}"
+        else:
+            enhanced_prompt = formatted_question
         
-        # Direct LLM response
+        # Generate response using LLM
         llm = get_llm()
-        response = llm.invoke(formatted_question)
+        response = llm.invoke(enhanced_prompt)
         return getattr(response, "content", str(response))
         
     except Exception as e:
@@ -341,10 +422,6 @@ def main():
     """Main application function"""
     # Initialize session state
     initialize_session_state()
-    
-    # Initialize vectorstore
-    if st.session_state.vectorstore is None:
-        st.session_state.vectorstore = initialize_vectorstore()
     
     # Sidebar
     with st.sidebar:
@@ -369,16 +446,14 @@ def main():
         
         # API status
         try:
-            if GROQ_API_KEY:
-                st.markdown('<div class="stat">🟢 API Connected</div>', unsafe_allow_html=True)
-            else:
-                st.markdown('<div class="stat">🔴 API Not Connected</div>', unsafe_allow_html=True)
+            get_groq_api_key()
+            st.markdown('<div class="stat">🟢 API Connected</div>', unsafe_allow_html=True)
         except:
-            st.markdown('<div class="stat">🟡 API Status Unknown</div>', unsafe_allow_html=True)
+            st.markdown('<div class="stat">🔴 API Not Connected</div>', unsafe_allow_html=True)
     
     # Main content
     st.markdown('<div class="page-title">🎓 Exam Assistant AI</div>', unsafe_allow_html=True)
-    st.caption("Your intelligent study companion powered by RAG and LLM technology")
+    st.caption("Your intelligent study companion powered by AI technology")
     
     # File upload
     uploaded_file = st.file_uploader(
@@ -392,21 +467,23 @@ def main():
         if validate_file_upload(uploaded_file):
             try:
                 with st.spinner("🔄 Processing PDF..."):
-                    file_bytes = uploaded_file.read()
-                    text, pages = parse_pdf_info(file_bytes, uploaded_file.name)
+                    text, pages = parse_pdf_info(uploaded_file)
                     
-                    # Create vectorstore
-                    st.session_state.vectorstore = create_vectorstore(text)
-                    
-                    # Update session state
-                    st.session_state.uploads.append({
-                        "name": uploaded_file.name,
-                        "size": uploaded_file.size,
-                        "pages": pages
-                    })
-                    st.session_state.indexed_files.add(uploaded_file.name)
-                    
-                    st.success(f"✅ Successfully processed {uploaded_file.name} ({pages} pages)")
+                    if text:
+                        # Store PDF content
+                        st.session_state.pdf_content = text
+                        
+                        # Update session state
+                        st.session_state.uploads.append({
+                            "name": uploaded_file.name,
+                            "size": uploaded_file.size,
+                            "pages": pages
+                        })
+                        st.session_state.indexed_files.add(uploaded_file.name)
+                        
+                        st.success(f"✅ Successfully processed {uploaded_file.name} ({pages} pages)")
+                    else:
+                        st.error("❌ Could not extract text from PDF")
                     
             except Exception as e:
                 st.error(f"❌ Error processing PDF: {str(e)}")
