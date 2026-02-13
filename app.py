@@ -432,7 +432,7 @@ with st.sidebar:
         st.session_state.question_count = 0
         st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-title">📊 Session Stats</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-title">📊 Session Status</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="stat">Questions asked: {st.session_state.question_count}</div>', unsafe_allow_html=True)
 
 st.markdown('<div class="page-title">🎓 Exam Assistant AI</div>', unsafe_allow_html=True)
