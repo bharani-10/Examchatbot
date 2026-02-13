@@ -79,8 +79,8 @@ Edit `config.py` to customize:
 - Vectorstore directory
 - Other settings
 
-  ## Test the app here
-  -https://examchatbot-01.streamlit.app/
+   ## Test the app here
+   https://examchatbot-01.streamlit.app/
 
 ## 🤝 Support
 
